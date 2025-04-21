@@ -253,14 +253,14 @@ class Pmdarima_Model:
             return
 
     def __split_df_dates(self, train, test):
-        '''
-        Helper function of splitting train and test sets into date variables
-        as X and data variables as y.
-        '''
+        """
+        Split train/test DataFrames into X (dates) and y (values).
+        Returns: X_train, y_train, X_test, y_test
+        """
         X_train = pd.DataFrame(train.index)
-        y_train = train.values
-        X_test = pd.DataFrame(test.index, index=range(X_train.size, self.length))
-        y_test = test.values
+        y_train = train.values.ravel()
+        X_test = pd.DataFrame(test.index, index=range(len(X_train), self.length))
+        y_test = test.values.ravel()
         return X_train, y_train, X_test, y_test
 
     def __train_test_split_dates(self):
@@ -347,14 +347,22 @@ class Pmdarima_Model:
 
         return exog_cat_df
 
-    def fit_model(self, model, func='AA'):
-        '''
-        Manually fit model on the date-split class variables X_train, y_train.
-        '''
-        # if func=='AA':
-            # model.fit(self.df, self.hist_dates_df)
-        # else:
-        model.fit(self.y_train, self.X_train)
+    def fit_model(self, verbose=False):
+        """
+        Fit an auto_arima model to the training data.
+        """
+        self.model = pm.auto_arima(
+            self.y_train,
+            start_p=1, start_q=1,
+            max_p=3, max_q=3,
+            m=12,
+            start_P=0, max_P=2,
+            start_Q=0, max_Q=2,
+            d=None, D=None,
+            stepwise=True,
+            suppress_warnings=True,
+            trace=verbose
+        )
 
     def __setup_mod_params(self, p=0, d=None, q=0, t='c', P=0, D=0, Q=0, m=0,
         with_intercept='auto', f_m=None, k=None, date=True, fourier=True, box=False,
@@ -475,63 +483,28 @@ class Pmdarima_Model:
         mod_params_df.index.name = 'Model'
         return mod_params, mod_params_df, pipe
 
-    def __run_stepwise_CV(self, model=None, func='AA', dynamic=False, verbose=1, debug=False):
-        '''
-        Heavily modified from https://github.com/alkaline-ml/pmdarima/issues/339
-        '''
+    def __run_stepwise_CV(self, verbose=False):
+        """
+        Perform step-wise cross-validation on test set.
+        """
+        self.predictions = [
+            self.__run_CV_loop(n, new_obs, verbose=verbose)
+            for n, new_obs in enumerate(tqdm(self.y_test, desc='Step-Wise Prediction Loop'))
+        ]
+        self.predictions = np.array(self.predictions)
+        return self.predictions
+        
         def __forecast_one_step(date_df):
             fc, conf_int = model.predict(X=date_df, return_conf_int=True)
             return fc.tolist()[0], conf_int.tolist()[0]
 
-        def __run_CV_loop(n, new_obs, verbose=0):  # should be called iteratively
-            fc, conf = __forecast_one_step(date_df)
-            forecasts.append(fc)
-            conf_ints.append(conf)
-
-            # update the existing model with a small number of MLE steps
-            if dynamic:
-                model.update([fc], date_df)
-            elif not dynamic:
-                model.update([new_obs], date_df)
-
-            ## make a little animation
-            if verbose:
-                if n&1:
-                    print('>_', end='\r')
-                else:
-                    print('> ', end='\r')
-                # date = pd.DataFrame([X_test.iloc[0].date + CBD], index=[X_train.size]columns=['date'])
-            date_df.iloc[0].date += CBD
-            date_df.index += 1
-            # return forecasts, conf_ints
-
-        if not model:
-            model = self.AA_mod_pipe
-            print('No model specified, defaulting to AutoARIMA best model.') if verbose else None
-
-        date_df = pd.DataFrame([self.X_test.iloc[0].date], index=[self.X_train.size], columns=['date'])
-        # date = X_test.iloc[0].date
-        forecasts = []
-        conf_ints = []
-        dynamic_str = ''
-        if dynamic:
-            dynamic_str = ' dynamically with forecasted values'
-        if verbose:
-            print(f'Iteratively making in-sample predictions on \'{self.data_name}\' Time Series and updating model{dynamic_str}, beginning with first index of y_test ...')
-        self.start = time.time()
-
-        if verbose:
-            # results = [__run_CV_loop(n, new_obs) for n, new_obs in tqdm(self.y_test, desc='Step-Wise Prediction Loop')]
-            [__run_CV_loop(n, new_obs, verbose=verbose) for n, new_obs in enumerate(tqdm(self.y_test, desc='Step-Wise Prediction Loop'))]
-        else:
-            # results = [__run_CV_loop(n, new_obs) for n, new_obs in self.y_test]
-            [__run_CV_loop(n, new_obs, verbose=verbose) for n, new_obs in enumerate(self.y_test)]
-        print() if verbose else None
-
-        self.end = time.time()
-        print('Done.')
-
-        return forecasts, conf_ints
+        def __run_CV_loop(self, n, new_obs, verbose=False):
+        """
+        Helper for step-wise cross-validation.
+        """
+        self.model = self.model.fit(self.y_train[:n+1])
+        pred = self.model.predict(n_periods=1)
+        return pred[0]
 
     def __run_stepwise_fc(self, exog_df, model, verbose=0):
         def __forecast_one_step(exog_df):
@@ -885,40 +858,24 @@ class Pmdarima_Model:
 
         # return self.X_train, self.y_train, self.X_test, sself.y_test, self.y_hat, self.conf_ints
 
-    def plot_test_predict(self, y_hat=None, conf_ints=True, ylabel=None, fin=True, func='AA'):
-        '''
-        Plot Test vs Predict with optional confidence intervals
-        '''
-        conf = ''
-        if ylabel == None:
-            ylabel = self.data_name
-        fig, ax = plt.subplots(figsize=(16, 8))
-        ax.plot(self.X_train, self.y_train, color='blue', alpha=0.5, label='Training Data')
-        ax.plot(self.X_test, self.y_hat, color='green', marker=',', alpha=0.7, label='Predicted')
-        ax.plot(self.X_test, self.y_test, color='magenta', alpha=0.3, label='Actual')
-        if conf_ints:
-            conf = '_Conf'
-            conf_int = np.asarray(self.conf_ints)
-            ax.fill_between(self.X_test.date,
-                     conf_int[:, 0], conf_int[:, 1],
-                     alpha=0.5, color='orange',
-                     label="Confidence Intervals")
-        ax.legend(loc='upper left', borderaxespad=0.5, prop={"size":16})
-        fig.suptitle(f'{ylabel} Time Series, {self.timeframe}, Freq = {self.freq}: Test vs Predict with Confidence Intervals\n', size=26)
-        ax.set_ylabel(ylabel, size=18)
-        ax.set_xlabel(ax.get_xlabel(), size=18)
-        tick_params = dict(size=4, width=1.5, labelsize=16)
-        ax.tick_params(axis='y', **tick_params)
-        ax.tick_params(axis='x', **tick_params)
-        if func == 'AA':
-            ax.set_title(f'AutoARIMA Best Parameters: {self.AA_best_params}', size=24)
-            plt.savefig(f'{TOP}/images/AutoArima/{self.ts}_{self.tf}_{self.f}_Test_vs_Predict{conf}.png')
-        elif func == 'GS':
-            ax.set_title(f'GridSearch Best Parameters: {self.GS_best_params}', size=24)
-            plt.savefig(f'{TOP}/images/GridSearch/{self.ts}_{self.tf}_{self.f}_Test_vs_Predict{conf}.png')
-        else:
-            ax.set_title(f'Parameters: {self.mod_params}', size=24)
-            plt.savefig(f'{TOP}/images/{self.ts}_{self.tf}_{self.f}_Test_vs_Predict{conf}.png')
+    def plot_test_predict(self):
+        """
+        Plot actual vs. predicted values for the test set.
+        """
+        if self.predictions is None:
+            raise ValueError("Run step-wise CV first to generate predictions.")
+        
+        test_dates = self.X_test.iloc[:, 0].values
+        actual = self.y_test
+        predicted = self.predictions
+
+        plot_profits(
+            test_dates,
+            actual,
+            predicted,
+            title="Actual vs Predicted Values",
+            ylabel="Value"
+        )
 
     def plot_forecast_conf(self, ohlc_df=None, ohlc_fc_df=None, hist_df=None, y_hat=None, y_hat_df=None, conf_ints=True,
             lookback=0, ylabel=None, fin=False, all_ohlc=False, func='GS'):
@@ -1010,22 +967,17 @@ class Pmdarima_Model:
             ax.set_title(f'Parameters: {self.mod_params}', size=24)
             plt.savefig(f'{TOP}/images/{self.ts}_{self.tf}_{self.f}_Hist_vs_Forecast{conf_filename}.png')
 
-    def __get_model_scores(self, y_test, y_hat, y_train, model, verbose=0, debug=False):
-        try:
-            AIC = model.named_steps['arima'].aic()
-        except AttributeError:
-            AIC = model.named_steps['arima'].model_.aic()
-        RMSE = mse(y_test, y_hat, squared=False)
-        RMSE_pc = 100*RMSE/y_train.mean()
-        SMAPE = smape(y_test, y_hat)
-        if verbose:
-            print("Test AIC: %.3f" % AIC)
-            print("Test RMSE: %.3f" % RMSE)
-            print("This is %.3f%% of the avg observed value." % RMSE_pc)
-            print("Test SMAPE: %.3f%%\n" % SMAPE)
-        if debug:
-            print("AIC: %.3f | RMSE: %.3f | RMSE%%=%.3f%% | SMAPE %.3f%%" % (AIC, RMSE, RMSE_pc, SMAPE))
-        return AIC, RMSE, RMSE_pc, SMAPE
+    def __get_model_scores(self):
+        """
+        Calculate MSE and RMSE for model predictions.
+        Fixed: Removed 'squared' parameter for compatibility with scikit-learn 0.24+.
+        """
+        if self.predictions is None:
+            raise ValueError("Run step-wise CV first to generate predictions.")
+        
+        mse = mean_squared_error(self.y_test, self.predictions)
+        rmse = root_mean_squared_error(self.y_test, self.predictions)
+        return {"MSE": mse, "RMSE": rmse}
 
     def run_stepwise_CV(self, model=None, func='AA', dynamic=False, verbose=1, visualize=True, return_conf_int=True):
         model_str = ''
@@ -1325,3 +1277,13 @@ class Pmdarima_Model:
                 lookback=lookback, conf_ints=return_conf_int, func=func, fin=fin)
 
         return self.fc_df, self.y_fc_hat, self.new_dates_df, self.fc_conf_ints
+
+def run_pipeline(self, verbose=False):
+        """
+        Run the full pipeline: fit model, predict, and evaluate.
+        """
+        self.fit_model(verbose=verbose)
+        self.__run_stepwise_CV(verbose=verbose)
+        scores = self.__get_model_scores()
+        print(f"Model Scores: {scores}")
+        self.plot_test_predict()
